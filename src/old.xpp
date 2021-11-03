@@ -1,28 +1,24 @@
-#include "Arduino.h"
 #include "esp_camera.h"
-#include "ESPAsyncWebServer.h"
-#include "WiFi.h"
+//#define CAMERA_MODEL_TTGO_T_CAMERA
+#define CAMERA_MODEL_AI_THINKER
+#include "camera_pins.h"
+#include <WiFi.h>
+#include "esp_timer.h"
+#include "img_converters.h"
+#include <Arduino.h>
+#include <ESPAsyncWebServer.h>
+#include "fb_gfx.h"
+#include "soc/soc.h"             // disable brownout problems
+#include "soc/rtc_cntl_reg.h"    // disable brownout problems
+#include "fauxmoESP.h"
 #include "credentials.h"
 
-int PWDN_GPIO_NUM;
-int RESET_GPIO_NUM;
-int XCLK_GPIO_NUM;
-int SIOD_GPIO_NUM;
-int SIOC_GPIO_NUM;
-int Y9_GPIO_NUM;
-int Y8_GPIO_NUM;
-int Y7_GPIO_NUM;
-int Y6_GPIO_NUM;
-int Y5_GPIO_NUM;
-int Y4_GPIO_NUM;
-int Y3_GPIO_NUM;
-int Y2_GPIO_NUM;
-int VSYNC_GPIO_NUM;
-int HREF_GPIO_NUM;
-int PCLK_GPIO_NUM;
-int BUTTON_GPIO_NUM;
-int BUTTONLED_GPIO_NUM;
-int ON_LED_STATE;
+fauxmoESP fauxmo;
+AsyncWebServer server(80);
+
+#define SERIAL_BAUDRATE                 115200
+#define LED                             2
+
 typedef struct {
         camera_fb_t * fb;
         size_t index;
@@ -410,103 +406,177 @@ void setCameraVar(AsyncWebServerRequest *request){
     request->send(response);
 }
 
-AsyncWebServer server(80);
 
 void wifiSetup() {
-  WiFi.mode(WIFI_STA);
-  Serial.printf("[WIFI] Connecting to %s ", WIFI_SSID);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  while (WiFi.status() != WL_CONNECTED) {
-    Serial.print(".");
-    delay(100);
-  }
-  Serial.println();
-  Serial.printf("[WIFI] STATION Mode, SSID: %s, IP address: %s\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
+
+    // Set WIFI module to STA mode
+    WiFi.mode(WIFI_STA);
+
+    // Connect
+    Serial.printf("[WIFI] Connecting to %s ", WIFI_SSID);
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+    // Wait
+    while (WiFi.status() != WL_CONNECTED) {
+        Serial.print(".");
+        delay(100);
+    }
+    Serial.println();
+
+    // Connected!
+    Serial.printf("[WIFI] STATION Mode, SSID: %s, IP address: %s\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
+
 }
 
-void initCamera() {
-  PWDN_GPIO_NUM = 32;
-  RESET_GPIO_NUM = -1;
-  XCLK_GPIO_NUM = 0;
-  SIOD_GPIO_NUM = 26;
-  SIOC_GPIO_NUM = 27;
-  Y9_GPIO_NUM = 35;
-  Y8_GPIO_NUM = 34;
-  Y7_GPIO_NUM = 39;
-  Y6_GPIO_NUM = 36;
-  Y5_GPIO_NUM = 21;
-  Y4_GPIO_NUM = 19;
-  Y3_GPIO_NUM = 18;
-  Y2_GPIO_NUM = 5;
-  VSYNC_GPIO_NUM = 25;
-  HREF_GPIO_NUM = 23;
-  PCLK_GPIO_NUM = 22;
-  BUTTON_GPIO_NUM = 12;
-  BUTTONLED_GPIO_NUM = 13;
-  ON_LED_STATE = HIGH;
-    //
-    camera_config_t config;
-    config.ledc_channel = LEDC_CHANNEL_0;
-    config.ledc_timer = LEDC_TIMER_0;
-    config.pin_d0 = Y2_GPIO_NUM;
-    config.pin_d1 = Y3_GPIO_NUM;
-    config.pin_d2 = Y4_GPIO_NUM;
-    config.pin_d3 = Y5_GPIO_NUM;
-    config.pin_d4 = Y6_GPIO_NUM;
-    config.pin_d5 = Y7_GPIO_NUM;
-    config.pin_d6 = Y8_GPIO_NUM;
-    config.pin_d7 = Y9_GPIO_NUM;
-    config.pin_xclk = XCLK_GPIO_NUM;
-    config.pin_pclk = PCLK_GPIO_NUM;
-    config.pin_vsync = VSYNC_GPIO_NUM;
-    config.pin_href = HREF_GPIO_NUM;
-    config.pin_sscb_sda = SIOD_GPIO_NUM;
-    config.pin_sscb_scl = SIOC_GPIO_NUM;
-    config.pin_pwdn = PWDN_GPIO_NUM;
-    config.pin_reset = RESET_GPIO_NUM;
-    config.xclk_freq_hz = 20000000;
-    config.pixel_format = PIXFORMAT_JPEG;
+void serverSetup() {
 
-    //Setup size of image
-    if (psramFound()) {
-        config.frame_size = FRAMESIZE_SVGA;
-        config.jpeg_quality = 10;
-        config.fb_count = 2;
-        Serial.println("SIM eu tenho PSRAM");
-    } else {
-        config.frame_size = FRAMESIZE_VGA;
-        config.jpeg_quality = 12;
-        config.fb_count = 1;
-        Serial.println("Ô MEU DEUS, Eu não tenho PSRAM");
-    }
+    // Custom entry point (not required by the library, here just as an example)
+    server.on("/index.html", HTTP_GET, [](AsyncWebServerRequest *request){
+        request->send(200, "text/plain", "Hello, world");
+    });
 
-    // Camera init
-    esp_err_t err = esp_camera_init(&config);
-    if (err != ESP_OK) {
-        Serial.println(F("Camera init failed!\n"));
-        return;
-    }
-
-    // restore the saved settings from SPIFFS
-
-    Serial.println(F("Camera initialised!\n"));
-}
-
-void setup(){
-  Serial.begin(115200);
-  //Serial.setDebugOutput(true);
-
-  wifiSetup();
-
-  initCamera();
+    // These two callbacks are required for gen1 and gen3 compatibility
+    server.onRequestBody([](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+        if (fauxmo.process(request->client(), request->method() == HTTP_GET, request->url(), String((char *)data))) return;
+        // Handle any other body request here...
+    });
+    server.onNotFound([](AsyncWebServerRequest *request) {
+        String body = (request->hasParam("body", true)) ? request->getParam("body", true)->value() : String();
+        if (fauxmo.process(request->client(), request->method() == HTTP_GET, request->url(), body)) return;
+        // Handle not found request here...
+    });
 
     server.on("/bmp", HTTP_GET, sendBMP);
     server.on("/capture", HTTP_GET, sendJpg);
     server.on("/stream", HTTP_GET, streamJpg);
     server.on("/control", HTTP_GET, setCameraVar);
     server.on("/status", HTTP_GET, getCameraStatus);
+
+    // Start the server
     server.begin();
+
+}
+
+void setup() {
+
+    // Init serial port and clean garbage
+    Serial.begin(SERIAL_BAUDRATE);
+    Serial.println();
+    Serial.println();
+
+    // LED
+    pinMode(LED, OUTPUT);
+    digitalWrite(LED, HIGH); // Our LED has inverse logic (high for OFF, low for ON)
+
+    // Wifi
+    wifiSetup();
+
+    // Web server
+    serverSetup();
+
+  // camera init
+  camera_config_t config;
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer = LEDC_TIMER_0;
+  config.pin_d0 = Y2_GPIO_NUM;
+  config.pin_d1 = Y3_GPIO_NUM;
+  config.pin_d2 = Y4_GPIO_NUM;
+  config.pin_d3 = Y5_GPIO_NUM;
+  config.pin_d4 = Y6_GPIO_NUM;
+  config.pin_d5 = Y7_GPIO_NUM;
+  config.pin_d6 = Y8_GPIO_NUM;
+  config.pin_d7 = Y9_GPIO_NUM;
+  config.pin_xclk = XCLK_GPIO_NUM;
+  config.pin_pclk = PCLK_GPIO_NUM;
+  config.pin_vsync = VSYNC_GPIO_NUM;
+  config.pin_href = HREF_GPIO_NUM;
+  config.pin_sscb_sda = SIOD_GPIO_NUM;
+  config.pin_sscb_scl = SIOC_GPIO_NUM;
+  config.pin_pwdn = PWDN_GPIO_NUM;
+  config.pin_reset = RESET_GPIO_NUM;
+  config.xclk_freq_hz = 20000000;
+  config.pixel_format = PIXFORMAT_JPEG;
+  if(psramFound()){
+    config.frame_size = FRAMESIZE_UXGA;
+    config.jpeg_quality = 10;
+    config.fb_count = 2;
+  } else {
+    config.frame_size = FRAMESIZE_SVGA;
+    config.jpeg_quality = 12;
+    config.fb_count = 1;
+  }
+
+  Serial.println("Testando camera");
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    Serial.printf("Camera init failed with error 0x%x", err);
+  } else {
+    Serial.println("Camera OK");
+  }
+  Serial.println("passou");
+  Serial.println(err);
+
+    // Set fauxmoESP to not create an internal TCP server and redirect requests to the server on the defined port
+    // The TCP port must be 80 for gen3 devices (default is 1901)
+    // This has to be done before the call to enable()
+    fauxmo.createServer(false);
+    fauxmo.setPort(80); // This is required for gen3 devices
+
+    // You have to call enable(true) once you have a WiFi connection
+    // You can enable or disable the library at any moment
+    // Disabling it will prevent the devices from being discovered and switched
+    fauxmo.enable(true);
+
+    // You can use different ways to invoke alexa to modify the devices state:
+    // "Alexa, turn kitchen on" ("kitchen" is the name of the first device below)
+    // "Alexa, turn on kitchen"
+    // "Alexa, set kitchen to fifty" (50 means 50% of brightness)
+
+    // Add virtual devices
+    fauxmo.addDevice("kitchen");
+	fauxmo.addDevice("livingroom");
+
+    // You can add more devices
+	//fauxmo.addDevice("light 3");
+    //fauxmo.addDevice("light 4");
+    //fauxmo.addDevice("light 5");
+    //fauxmo.addDevice("light 6");
+    //fauxmo.addDevice("light 7");
+    //fauxmo.addDevice("light 8");
+
+    fauxmo.onSetState([](unsigned char device_id, const char * device_name, bool state, unsigned char value) {
+
+        // Callback when a command from Alexa is received.
+        // You can use device_id or device_name to choose the element to perform an action onto (relay, LED,...)
+        // State is a boolean (ON/OFF) and value a number from 0 to 255 (if you say "set kitchen light to 50%" you will receive a 128 here).
+        // Just remember not to delay too much here, this is a callback, exit as soon as possible.
+        // If you have to do something more involved here set a flag and process it in your main loop.
+
+        // if (0 == device_id) digitalWrite(RELAY1_PIN, state);
+        // if (1 == device_id) digitalWrite(RELAY2_PIN, state);
+        // if (2 == device_id) analogWrite(LED1_PIN, value);
+
+        Serial.printf("[MAIN] Device #%d (%s) state: %s value: %d\n", device_id, device_name, state ? "ON" : "OFF", value);
+
+        // For the example we are turning the same LED on and off regardless fo the device triggered or the value
+        digitalWrite(LED, !state); // we are nor-ing the state because our LED has inverse logic.
+
+    });
+
 }
 
 void loop() {
+
+    // fauxmoESP uses an async TCP server but a sync UDP server
+    // Therefore, we have to manually poll for UDP packets
+    fauxmo.handle();
+
+    // This is a sample code to output free heap every 5 seconds
+    // This is a cheap way to detect memory leaks
+    static unsigned long last = millis();
+    if (millis() - last > 5000) {
+        last = millis();
+        Serial.printf("[MAIN] Free heap: %d bytes\n", ESP.getFreeHeap());
+    }
+
 }

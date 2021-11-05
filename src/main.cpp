@@ -1,8 +1,14 @@
-#include "Arduino.h"
-#include "esp_camera.h"
-#include "ESPAsyncWebServer.h"
-#include "WiFi.h"
-#include "credentials.h"
+#include <Arduino.h>
+#include <esp_camera.h>
+#include <ESPAsyncWebServer.h>
+#include <ESPAsyncWiFiManager.h>
+#include <WiFi.h>
+#include <ESPmDNS.h>
+#include <fauxmoESP.h>
+#include <credentials.h>
+
+#define LED 4
+#define PIRPIN 19
 
 int PWDN_GPIO_NUM;
 int RESET_GPIO_NUM;
@@ -23,6 +29,14 @@ int PCLK_GPIO_NUM;
 int BUTTON_GPIO_NUM;
 int BUTTONLED_GPIO_NUM;
 int ON_LED_STATE;
+
+int ledStatus;
+
+
+const unsigned long BOT_MTBS = 1000; // mean time between scan messages
+
+unsigned long bot_lasttime;
+
 typedef struct {
         camera_fb_t * fb;
         size_t index;
@@ -226,6 +240,12 @@ class AsyncJpegStreamResponse: public AsyncAbstractResponse {
         }
 };
 
+void configModeCallback (AsyncWiFiManager *myWiFiManager) {
+  Serial.println("Entered config mode");
+  Serial.println(WiFi.softAPIP());
+  //if you used auto generated SSID, print it
+  Serial.println(myWiFiManager->getConfigPortalSSID());
+}
 
 void sendBMP(AsyncWebServerRequest *request){
     camera_fb_t * fb = esp_camera_fb_get();
@@ -410,21 +430,63 @@ void setCameraVar(AsyncWebServerRequest *request){
     request->send(response);
 }
 
+fauxmoESP fauxmo;
 AsyncWebServer server(80);
+DNSServer dns;
+const int ledPin = 4;
+
 
 void wifiSetup() {
-  WiFi.mode(WIFI_STA);
-  Serial.printf("[WIFI] Connecting to %s ", WIFI_SSID);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  while (WiFi.status() != WL_CONNECTED) {
+  // WiFi.mode(WIFI_STA);
+  // Serial.printf("[WIFI] Connecting to %s ", WIFI_SSID);
+  // WiFi.begin(WIFI_SSID, WIFI_PASS);
+  // while (WiFi.status() != WL_CONNECTED) {
+  //   Serial.print(".");
+  //   delay(100);
+  // }
+  // Serial.println();
+  // Serial.printf("[WIFI] STATION Mode, SSID: %s, IP address: %s\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
+
+  AsyncWiFiManager wifiManager(&server,&dns);
+  //reset settings - for testing
+  //wifiManager.resetSettings();
+
+  //set callback that gets called when connecting to previous WiFi fails, and enters Access Point mode
+  wifiManager.setAPCallback(configModeCallback);
+
+  //fetches ssid and pass and tries to connect
+  //if it does not connect it starts an access point with the specified name
+  //here  "AutoConnectAP"
+  //and goes into a blocking loop awaiting configuration
+  if(!wifiManager.autoConnect()) {
+    Serial.println("failed to connect and hit timeout");
+    //reset and try again, or maybe put it to deep sleep
+    ESP.restart();
+    delay(1000);
+  }
+
+  //if you get here you have connected to the WiFi
+  Serial.println("connected...yeey :)");
+  Serial.printf("[WIFI] STATION Mode, SSID: %s, IP address: %s\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
+  if(!MDNS.begin("levicam")) {
+    Serial.println("Falha no MDNS");
+  } else {
+    Serial.println("MDNS Inicializado!");
+    MDNS.addService("http", "tcp", 80);
+  }
+
+  Serial.print("Retrieving time: ");
+  configTime(0, 0, "a.st1.ntp.br"); // get UTC time via NTP
+  time_t now = time(nullptr);
+  while (now < 24 * 3600)
+  {
     Serial.print(".");
     delay(100);
+    now = time(nullptr);
   }
-  Serial.println();
-  Serial.printf("[WIFI] STATION Mode, SSID: %s, IP address: %s\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
 }
 
-void initCamera() {
+void aithinker() {
   PWDN_GPIO_NUM = 32;
   RESET_GPIO_NUM = -1;
   XCLK_GPIO_NUM = 0;
@@ -443,6 +505,32 @@ void initCamera() {
   PCLK_GPIO_NUM = 22;
   BUTTON_GPIO_NUM = 12;
   BUTTONLED_GPIO_NUM = 13;
+}
+
+void tcamera() {
+  PWDN_GPIO_NUM = -1;
+  RESET_GPIO_NUM = -1;
+  XCLK_GPIO_NUM = 4;
+  SIOD_GPIO_NUM = 18;
+  SIOC_GPIO_NUM = 23;
+  Y9_GPIO_NUM = 36;
+  Y8_GPIO_NUM = 37;
+  Y7_GPIO_NUM = 38;
+  Y6_GPIO_NUM = 39;
+  Y5_GPIO_NUM = 35;
+  Y4_GPIO_NUM = 14;
+  Y3_GPIO_NUM = 13;
+  Y2_GPIO_NUM = 34;
+  VSYNC_GPIO_NUM = 5;
+  HREF_GPIO_NUM = 27;
+  PCLK_GPIO_NUM = 25;
+  BUTTON_GPIO_NUM = 15;
+  // BUTTONLED_GPIO_NUM = 13;
+}
+
+void initCamera() {
+  aithinker();
+
   ON_LED_STATE = HIGH;
     //
     camera_config_t config;
@@ -472,12 +560,10 @@ void initCamera() {
         config.frame_size = FRAMESIZE_SVGA;
         config.jpeg_quality = 10;
         config.fb_count = 2;
-        Serial.println("SIM eu tenho PSRAM");
     } else {
         config.frame_size = FRAMESIZE_VGA;
         config.jpeg_quality = 12;
         config.fb_count = 1;
-        Serial.println("Ô MEU DEUS, Eu não tenho PSRAM");
     }
 
     // Camera init
@@ -492,21 +578,61 @@ void initCamera() {
     Serial.println(F("Camera initialised!\n"));
 }
 
+void fauxmoSetup() {
+  // Custom entry point (not required by the library, here just as an example)
+  server.on("/index.html", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send(200, "text/plain", "Hello, world");
+  });
+
+  // These two callbacks are required for gen1 and gen3 compatibility
+  server.onRequestBody([](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+    if (fauxmo.process(request->client(), request->method() == HTTP_GET, request->url(), String((char *)data))) return;
+    // Handle any other body request here...
+  });
+  server.onNotFound([](AsyncWebServerRequest *request) {
+    String body = (request->hasParam("body", true)) ? request->getParam("body", true)->value() : String();
+    if (fauxmo.process(request->client(), request->method() == HTTP_GET, request->url(), body)) return;
+    // Handle not found request here...
+  });
+}
+
 void setup(){
   Serial.begin(115200);
-  //Serial.setDebugOutput(true);
+  pinMode(LED, OUTPUT);
+  pinMode(PIRPIN, INPUT);
+  // Serial.setDebugOutput(true);
 
   wifiSetup();
 
   initCamera();
 
-    server.on("/bmp", HTTP_GET, sendBMP);
-    server.on("/capture", HTTP_GET, sendJpg);
-    server.on("/stream", HTTP_GET, streamJpg);
-    server.on("/control", HTTP_GET, setCameraVar);
-    server.on("/status", HTTP_GET, getCameraStatus);
-    server.begin();
+  server.on("/bmp", HTTP_GET, sendBMP);
+  server.on("/capture", HTTP_GET, sendJpg);
+  server.on("/stream", HTTP_GET, streamJpg);
+  server.on("/control", HTTP_GET, setCameraVar);
+  server.on("/status", HTTP_GET, getCameraStatus);
+  fauxmoSetup();
+  server.begin();
+  fauxmo.createServer(false);
+  fauxmo.setPort(80);
+  fauxmo.enable(true);
+  fauxmo.addDevice("lavabo");
+  fauxmo.addDevice("cachorro");
+  fauxmo.onSetState([](unsigned char device_id, const char * device_name, bool state, unsigned char value) {
+    Serial.printf("[MAIN] Device #%d (%s) state: %s value: %d\n", device_id, device_name, state ? "ON" : "OFF", value);
+    digitalWrite(LED, !state); // we are nor-ing the state because our LED has inverse logic.
+  });
+}
+
+void statusHandle() {
+static unsigned long last = millis();
+  if (millis() - last > 30000) {
+    last = millis();
+    Serial.printf("[MAIN] Free heap: %d bytes\n", ESP.getFreeHeap());
+  }
 }
 
 void loop() {
+  fauxmo.handle();
+  statusHandle();
 }

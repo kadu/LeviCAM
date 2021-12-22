@@ -4,11 +4,12 @@
 #include <ESPAsyncWiFiManager.h>
 #include <WiFi.h>
 #include <ESPmDNS.h>
-#include <fauxmoESP.h>
 #include <credentials.h>
 
 #define LED 4
 #define PIRPIN 19
+#define PINLUZ 2
+#define BATTERYPIN 13
 
 int PWDN_GPIO_NUM;
 int RESET_GPIO_NUM;
@@ -31,6 +32,7 @@ int BUTTONLED_GPIO_NUM;
 int ON_LED_STATE;
 
 int ledStatus;
+int luzStatus;
 
 
 const unsigned long BOT_MTBS = 1000; // mean time between scan messages
@@ -329,6 +331,15 @@ void streamJpg(AsyncWebServerRequest *request){
     request->send(response);
 }
 
+
+void htmlRender(AsyncWebServerRequest *request) {
+  AsyncResponseStream *response = request->beginResponseStream("text/html");
+  response->print("<!DOCTYPE html><html lang=\"en\"><head> <meta charset=\"UTF-8\"> <meta http-equiv=\"X-UA-Compatible\" content=\"IE=edge\"> <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"> <title>LiveCam</title></head><body> <style> .camera { max-width: 100%; max-height: 100%; bottom: 0; left: 0; margin: auto; overflow: auto; position: fixed; right: 0; top: 0; -o-object-fit: contain; object-fit: contain; } body { background-color: black; } </style><img class=\"camera\" src=\"http://");
+  response->print(WiFi.localIP().toString().c_str());
+  response->print("/stream\"></body></html>");
+  request->send(response);
+}
+
 void getCameraStatus(AsyncWebServerRequest *request){
     static char json_response[1024];
 
@@ -372,6 +383,33 @@ void getCameraStatus(AsyncWebServerRequest *request){
     AsyncWebServerResponse * response = request->beginResponse(200, "application/json", json_response);
     response->addHeader("Access-Control-Allow-Origin", "*");
     request->send(response);
+}
+
+void getBatteryLevel(AsyncWebServerRequest *request) {
+  uint16_t level = analogRead(BATTERYPIN);
+  // verificar como ler o valor do ADC e imprimir esse valor (ESP32)
+  String retorno = String(level);
+  request->send(200, "application/json", "{\"battery\": \""+ retorno +"\"}");
+}
+
+
+void toogleLight(AsyncWebServerRequest *request) {
+  luzStatus = !luzStatus;
+  digitalWrite(PINLUZ, luzStatus);
+  // digitalWrite(LED, luzStatus);
+  Serial.print("Toggle Light : ");
+  Serial.println(luzStatus);
+  String retorno = luzStatus? "Ligada": "Desligada";
+  request->send(200, "application/json", "{\"luz\": \""+ retorno +"\"}");
+}
+
+void toogleFlashLight(AsyncWebServerRequest *request) {
+  ledStatus = !ledStatus;
+  digitalWrite(LED, ledStatus);
+  Serial.print("Toggle Flash Light : ");
+  Serial.println(ledStatus);
+  String retorno = ledStatus? "Ligada": "Desligada";
+  request->send(200, "application/json", "{\"flash\": \""+ retorno +"\"}");
 }
 
 void setCameraVar(AsyncWebServerRequest *request){
@@ -430,7 +468,6 @@ void setCameraVar(AsyncWebServerRequest *request){
     request->send(response);
 }
 
-fauxmoESP fauxmo;
 AsyncWebServer server(80);
 DNSServer dns;
 const int ledPin = 4;
@@ -578,29 +615,14 @@ void initCamera() {
     Serial.println(F("Camera initialised!\n"));
 }
 
-void fauxmoSetup() {
-  // Custom entry point (not required by the library, here just as an example)
-  server.on("/index.html", HTTP_GET, [](AsyncWebServerRequest *request){
-    request->send(200, "text/plain", "Hello, world");
-  });
-
-  // These two callbacks are required for gen1 and gen3 compatibility
-  server.onRequestBody([](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-    if (fauxmo.process(request->client(), request->method() == HTTP_GET, request->url(), String((char *)data))) return;
-    // Handle any other body request here...
-  });
-  server.onNotFound([](AsyncWebServerRequest *request) {
-    String body = (request->hasParam("body", true)) ? request->getParam("body", true)->value() : String();
-    if (fauxmo.process(request->client(), request->method() == HTTP_GET, request->url(), body)) return;
-    // Handle not found request here...
-  });
-}
-
 void setup(){
   Serial.begin(115200);
   pinMode(LED, OUTPUT);
-  pinMode(PIRPIN, INPUT);
+  // pinMode(PIRPIN, INPUT);
+  pinMode(PINLUZ, OUTPUT);
+  pinMode(BATTERYPIN, INPUT);
   // Serial.setDebugOutput(true);
+  luzStatus = false;
 
   wifiSetup();
 
@@ -611,28 +633,13 @@ void setup(){
   server.on("/stream", HTTP_GET, streamJpg);
   server.on("/control", HTTP_GET, setCameraVar);
   server.on("/status", HTTP_GET, getCameraStatus);
-  fauxmoSetup();
-  server.begin();
-  fauxmo.createServer(false);
-  fauxmo.setPort(80);
-  fauxmo.enable(true);
-  fauxmo.addDevice("lavabo");
-  fauxmo.addDevice("cachorro");
-  fauxmo.onSetState([](unsigned char device_id, const char * device_name, bool state, unsigned char value) {
-    Serial.printf("[MAIN] Device #%d (%s) state: %s value: %d\n", device_id, device_name, state ? "ON" : "OFF", value);
-    digitalWrite(LED, !state); // we are nor-ing the state because our LED has inverse logic.
-  });
-}
+  server.on("/luz", HTTP_GET, toogleLight);
+  server.on("/flash", HTTP_GET, toogleFlashLight);
+  server.on("/battery", HTTP_GET, getBatteryLevel);
+  server.on("/stream2", HTTP_GET, htmlRender);
 
-void statusHandle() {
-static unsigned long last = millis();
-  if (millis() - last > 30000) {
-    last = millis();
-    Serial.printf("[MAIN] Free heap: %d bytes\n", ESP.getFreeHeap());
-  }
+  server.begin();
 }
 
 void loop() {
-  fauxmo.handle();
-  statusHandle();
 }

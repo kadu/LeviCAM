@@ -6,11 +6,6 @@
 #include <ESPmDNS.h>
 #include <credentials.h>
 
-#define LED 4
-#define PIRPIN 19
-#define PINLUZ 2
-#define BATTERYPIN 13
-
 int PWDN_GPIO_NUM;
 int RESET_GPIO_NUM;
 int XCLK_GPIO_NUM;
@@ -31,13 +26,10 @@ int BUTTON_GPIO_NUM;
 int BUTTONLED_GPIO_NUM;
 int ON_LED_STATE;
 
-int ledStatus;
-int luzStatus;
-
-
 const unsigned long BOT_MTBS = 1000; // mean time between scan messages
-
 unsigned long bot_lasttime;
+unsigned long _ledof;
+unsigned int _DESLIGALED = 30000;
 
 typedef struct {
         camera_fb_t * fb;
@@ -51,6 +43,19 @@ static const char* STREAM_PART = "Content-Type: %s\r\nContent-Length: %u\r\n\r\n
 
 static const char * JPG_CONTENT_TYPE = "image/jpeg";
 static const char * BMP_CONTENT_TYPE = "image/x-windows-bmp";
+
+void turnLedOff() {
+  if(_ledof == 0) {
+   return;
+  }
+
+  if(_ledof < millis()) {
+    Serial.println("LED OFF");
+    ON_LED_STATE = LOW;
+    digitalWrite(GPIO_NUM_2, ON_LED_STATE);
+    _ledof = 0;
+  }
+}
 
 class AsyncBufferResponse: public AsyncAbstractResponse {
     private:
@@ -385,33 +390,6 @@ void getCameraStatus(AsyncWebServerRequest *request){
     request->send(response);
 }
 
-void getBatteryLevel(AsyncWebServerRequest *request) {
-  uint16_t level = analogRead(BATTERYPIN);
-  // verificar como ler o valor do ADC e imprimir esse valor (ESP32)
-  String retorno = String(level);
-  request->send(200, "application/json", "{\"battery\": \""+ retorno +"\"}");
-}
-
-
-void toogleLight(AsyncWebServerRequest *request) {
-  luzStatus = !luzStatus;
-  digitalWrite(PINLUZ, luzStatus);
-  // digitalWrite(LED, luzStatus);
-  Serial.print("Toggle Light : ");
-  Serial.println(luzStatus);
-  String retorno = luzStatus? "Ligada": "Desligada";
-  request->send(200, "application/json", "{\"luz\": \""+ retorno +"\"}");
-}
-
-void toogleFlashLight(AsyncWebServerRequest *request) {
-  ledStatus = !ledStatus;
-  digitalWrite(LED, ledStatus);
-  Serial.print("Toggle Flash Light : ");
-  Serial.println(ledStatus);
-  String retorno = ledStatus? "Ligada": "Desligada";
-  request->send(200, "application/json", "{\"flash\": \""+ retorno +"\"}");
-}
-
 void setCameraVar(AsyncWebServerRequest *request){
     if(!request->hasArg("var") || !request->hasArg("val")){
         request->send(404);
@@ -468,10 +446,38 @@ void setCameraVar(AsyncWebServerRequest *request){
     request->send(response);
 }
 
+
+void setLuz(AsyncWebServerRequest *request){
+  ON_LED_STATE = !ON_LED_STATE;
+  digitalWrite(GPIO_NUM_2, ON_LED_STATE);
+  static char json_response[1024];
+  char * p = json_response;
+  *p++ = '{';
+  p+=sprintf(p, "\"luz\":%s,", ON_LED_STATE == LOW ? "false": "true");
+  *p++ = '}';
+  *p++ = 0;
+  AsyncWebServerResponse * response = request->beginResponse(200, "application/json", json_response);
+  response->addHeader("Access-Control-Allow-Origin", "*");
+  request->send(response);
+  if(ON_LED_STATE == HIGH){
+    _ledof = millis() + _DESLIGALED;
+  }
+}
+
+void getLuz(AsyncWebServerRequest *request){
+  static char json_response[1024];
+  char * p = json_response;
+  *p++ = '{';
+  p+=sprintf(p, "\"luz\":%s,", ON_LED_STATE == LOW ? "false": "true");
+  *p++ = '}';
+  *p++ = 0;
+  AsyncWebServerResponse * response = request->beginResponse(200, "application/json", json_response);
+  response->addHeader("Access-Control-Allow-Origin", "*");
+  request->send(response);
+}
+
 AsyncWebServer server(80);
 DNSServer dns;
-const int ledPin = 4;
-
 
 void wifiSetup() {
   // WiFi.mode(WIFI_STA);
@@ -483,10 +489,10 @@ void wifiSetup() {
   // }
   // Serial.println();
   // Serial.printf("[WIFI] STATION Mode, SSID: %s, IP address: %s\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
-
+  digitalWrite(GPIO_NUM_4, HIGH);
   AsyncWiFiManager wifiManager(&server,&dns);
   //reset settings - for testing
-  //wifiManager.resetSettings();
+  // wifiManager.resetSettings();
 
   //set callback that gets called when connecting to previous WiFi fails, and enters Access Point mode
   wifiManager.setAPCallback(configModeCallback);
@@ -495,7 +501,7 @@ void wifiSetup() {
   //if it does not connect it starts an access point with the specified name
   //here  "AutoConnectAP"
   //and goes into a blocking loop awaiting configuration
-  if(!wifiManager.autoConnect()) {
+  if(!wifiManager.autoConnect("Levi-Cam")) {
     Serial.println("failed to connect and hit timeout");
     //reset and try again, or maybe put it to deep sleep
     ESP.restart();
@@ -521,6 +527,8 @@ void wifiSetup() {
     delay(100);
     now = time(nullptr);
   }
+
+  digitalWrite(GPIO_NUM_4, LOW);
 }
 
 void aithinker() {
@@ -569,63 +577,60 @@ void initCamera() {
   aithinker();
 
   ON_LED_STATE = HIGH;
-    //
-    camera_config_t config;
-    config.ledc_channel = LEDC_CHANNEL_0;
-    config.ledc_timer = LEDC_TIMER_0;
-    config.pin_d0 = Y2_GPIO_NUM;
-    config.pin_d1 = Y3_GPIO_NUM;
-    config.pin_d2 = Y4_GPIO_NUM;
-    config.pin_d3 = Y5_GPIO_NUM;
-    config.pin_d4 = Y6_GPIO_NUM;
-    config.pin_d5 = Y7_GPIO_NUM;
-    config.pin_d6 = Y8_GPIO_NUM;
-    config.pin_d7 = Y9_GPIO_NUM;
-    config.pin_xclk = XCLK_GPIO_NUM;
-    config.pin_pclk = PCLK_GPIO_NUM;
-    config.pin_vsync = VSYNC_GPIO_NUM;
-    config.pin_href = HREF_GPIO_NUM;
-    config.pin_sscb_sda = SIOD_GPIO_NUM;
-    config.pin_sscb_scl = SIOC_GPIO_NUM;
-    config.pin_pwdn = PWDN_GPIO_NUM;
-    config.pin_reset = RESET_GPIO_NUM;
-    config.xclk_freq_hz = 20000000;
-    config.pixel_format = PIXFORMAT_JPEG;
+  camera_config_t config;
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer = LEDC_TIMER_0;
+  config.pin_d0 = Y2_GPIO_NUM;
+  config.pin_d1 = Y3_GPIO_NUM;
+  config.pin_d2 = Y4_GPIO_NUM;
+  config.pin_d3 = Y5_GPIO_NUM;
+  config.pin_d4 = Y6_GPIO_NUM;
+  config.pin_d5 = Y7_GPIO_NUM;
+  config.pin_d6 = Y8_GPIO_NUM;
+  config.pin_d7 = Y9_GPIO_NUM;
+  config.pin_xclk = XCLK_GPIO_NUM;
+  config.pin_pclk = PCLK_GPIO_NUM;
+  config.pin_vsync = VSYNC_GPIO_NUM;
+  config.pin_href = HREF_GPIO_NUM;
+  config.pin_sscb_sda = SIOD_GPIO_NUM;
+  config.pin_sscb_scl = SIOC_GPIO_NUM;
+  config.pin_pwdn = PWDN_GPIO_NUM;
+  config.pin_reset = RESET_GPIO_NUM;
+  config.xclk_freq_hz = 20000000;
+  config.pixel_format = PIXFORMAT_JPEG;
 
-    //Setup size of image
-    if (psramFound()) {
-        config.frame_size = FRAMESIZE_SVGA;
-        config.jpeg_quality = 10;
-        config.fb_count = 2;
-    } else {
-        config.frame_size = FRAMESIZE_VGA;
-        config.jpeg_quality = 12;
-        config.fb_count = 1;
-    }
+  //Setup size of image
+  if (psramFound()) {
+      config.frame_size = FRAMESIZE_VGA;
+      config.jpeg_quality = 10;
+      config.fb_count = 2;
+  } else {
+      config.frame_size = FRAMESIZE_VGA;
+      config.jpeg_quality = 12;
+      config.fb_count = 1;
+  }
 
-    // Camera init
-    esp_err_t err = esp_camera_init(&config);
-    if (err != ESP_OK) {
-        Serial.println(F("Camera init failed!\n"));
-        return;
-    }
+  // Camera init
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+      Serial.println(F("Camera init failed!\n"));
+      return;
+  }
 
-    // restore the saved settings from SPIFFS
+  // restore the saved settings from SPIFFS
 
-    Serial.println(F("Camera initialised!\n"));
+  Serial.println(F("Camera initialised!\n"));
 }
 
 void setup(){
   Serial.begin(115200);
-  pinMode(LED, OUTPUT);
-  // pinMode(PIRPIN, INPUT);
-  pinMode(PINLUZ, OUTPUT);
-  pinMode(BATTERYPIN, INPUT);
-  // Serial.setDebugOutput(true);
-  luzStatus = false;
+  Serial.setDebugOutput(true);
+  pinMode(GPIO_NUM_2, OUTPUT);
+  digitalWrite(GPIO_NUM_2, HIGH);
+  ON_LED_STATE = HIGH;
+  pinMode(GPIO_NUM_4, OUTPUT);
 
   wifiSetup();
-
   initCamera();
 
   server.on("/bmp", HTTP_GET, sendBMP);
@@ -633,13 +638,15 @@ void setup(){
   server.on("/stream", HTTP_GET, streamJpg);
   server.on("/control", HTTP_GET, setCameraVar);
   server.on("/status", HTTP_GET, getCameraStatus);
-  server.on("/luz", HTTP_GET, toogleLight);
-  server.on("/flash", HTTP_GET, toogleFlashLight);
-  server.on("/battery", HTTP_GET, getBatteryLevel);
   server.on("/stream2", HTTP_GET, htmlRender);
-
+  server.on("/luz", HTTP_GET, setLuz);
+  server.on("/luzstatus", HTTP_GET, getLuz);
+  server.on("/", HTTP_GET, htmlRender);
   server.begin();
+
+  _ledof = millis() + 500;
 }
 
 void loop() {
+  turnLedOff();
 }
